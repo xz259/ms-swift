@@ -746,6 +746,103 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             messages = inputs[i]['messages']
             InferRequest.remove_response(messages)
             messages.append({'role': 'assistant', 'content': output.choices[0].message.content})
+
+        # SOLUTION REPLACEMENT LOGIC STARTS HERE
+  
+        def extract_boxed_text(text):
+            pattern = r'\\boxed{(.*?)}'
+            matches = re.findall(pattern, text)
+            if not matches:
+                return None
+                
+            for match in matches[::-1]:
+                if match != "":
+                    try:
+                        num = float(match)
+                        if num == int(num): 
+                            return int(num)
+                    except Exception:
+                        pass           
+            return None
+    
+        # First gather all inputs across processes
+        all_inputs = gather_object(inputs)
+        
+        # Organize completions by question
+        completions_by_question = []
+        input_indices_by_question = []
+        
+        # Group input indices by question
+        current_indices = []
+        current_question = None
+        
+        for i, input_item in enumerate(all_inputs):
+            question = input_item['prompt'][1]['content'] if len(input_item['prompt']) > 1 else None
+            
+            if current_question is None:
+                current_question = question
+                current_indices = [i]
+            elif question == current_question:
+                current_indices.append(i)
+            else:
+                input_indices_by_question.append(current_indices)
+                current_indices = [i]
+                current_question = question
+        
+        # Add the last group
+        if current_indices:
+            input_indices_by_question.append(current_indices)
+        
+        # Now replace longest incorrect solution for each question group
+        for group_indices in input_indices_by_question:
+            if not group_indices:
+                continue
+                
+            # Get answer and solution for this question
+            answer = all_inputs[group_indices[0]].get('answer', None)
+            reference_solution = all_inputs[group_indices[0]].get('solution', None)
+            
+            if answer is None or reference_solution is None:
+                continue
+            
+            # Check correctness of each completion in this group
+            has_correct_solution = False
+            incorrect_indices = []
+            
+            for idx in group_indices:
+                if idx < len(all_inputs) and 'messages' in all_inputs[idx] and len(all_inputs[idx]['messages']) > 0:
+                    completion = all_inputs[idx]['messages'][-1]['content']
+                    extracted = extract_boxed_text(completion)
+                    
+                    if extracted is not None and extracted == answer:
+                        has_correct_solution = True
+                    else:
+                        incorrect_indices.append(idx)
+            
+            # If no correct solutions, replace the longest incorrect one
+            if not has_correct_solution and incorrect_indices and reference_solution:
+                # Get lengths of each incorrect completion
+                incorrect_lengths = []
+                
+                for idx in incorrect_indices:
+                    completion = all_inputs[idx]['messages'][-1]['content']
+                    # Use a simple length metric (could change to token count)
+                    incorrect_lengths.append((idx, len(completion)))
+                
+                # Sort by length (descending)
+                incorrect_lengths.sort(key=lambda x: x[1], reverse=True)
+                
+                # Get the index of the longest incorrect completion
+                longest_idx = incorrect_lengths[0][0]
+                
+                # Only modify if this completion is in the current process's slice
+                local_idx = longest_idx - self.accelerator.process_index * len(inputs)
+                if 0 <= local_idx < len(inputs):
+                    inputs[local_idx]['messages'][-1]['content'] = reference_solution
+    
+        # SOLUTION REPLACEMENT LOGIC ENDS HERE
+
+              
         from copy import copy
         template = copy(self.template)
         with self._template_context(template):
