@@ -780,12 +780,19 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 with self._template_context(reward_template):
                     batched_inputs = [reward_template.encode(infer_request) for infer_request in inputs]
                     reward_inputs = to_device(reward_template.data_collator(batched_inputs), reward_func.device)
-
                 with torch.inference_mode():
                     rewards_per_func[:, i] = reward_func(**reward_inputs).logits[:, 0]
             else:
-                # Repeat all input columns (but "messages" and "completion") to match the number of generations
+                # First create the reward_kwargs dictionary
                 reward_kwargs = RowPreprocessor.rows_to_batched(inputs)
+                
+                # Then add completion_mask-derived token lengths to reward_kwargs
+                if 'completion_mask' in outputs:  # Check for key in dictionary, not attribute
+                    # Get token lengths from completion mask
+                    token_lengths = outputs['completion_mask'].sum(dim=1).tolist()
+                    reward_kwargs['token_lengths'] = token_lengths
+                
+                # Call the reward function with completions and the enhanced reward_kwargs
                 output_reward_func = reward_func(completions, **reward_kwargs)
                 rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
