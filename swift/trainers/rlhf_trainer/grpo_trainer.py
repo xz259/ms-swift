@@ -6,6 +6,7 @@ import os
 import re
 import time
 from collections import defaultdict
+import csv
 from concurrent.futures import Future
 from contextlib import contextmanager
 from copy import copy, deepcopy
@@ -711,8 +712,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
     def old_policy(self):
         return self.num_iterations > 1
 
-    def _generate_and_score_completions(
-            self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
+    def _generate_and_score_completions(self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
 
         device = self.accelerator.device
         # Generate completions using either vLLM or regular generation
@@ -747,8 +747,10 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             InferRequest.remove_response(messages)
             messages.append({'role': 'assistant', 'content': output.choices[0].message.content})
 
+        # Compute token lengths first
+        outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
+              
         # SOLUTION REPLACEMENT LOGIC STARTS HERE
-  
         def extract_boxed_text(text):
             pattern = r'\\boxed{(.*?)}'
             matches = re.findall(pattern, text)
@@ -820,16 +822,25 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                         incorrect_indices.append(idx)
             
             # If no correct solutions, replace the longest incorrect one
-            if not has_correct_solution and incorrect_indices and reference_solution:
+            if not has_correct_solution and incorrect_indices and reference_solution != "":
                 # Get lengths of each incorrect completion
                 incorrect_lengths = []
                 
                 for idx in incorrect_indices:
                     completion = all_inputs[idx]['messages'][-1]['content']
-                    # Use a simple length metric (could change to token count)
-                    incorrect_lengths.append((idx, len(completion)))
+                    
+                    # Use token length from completion_mask when available
+                    local_idx = idx - self.accelerator.process_index * len(inputs)
+                    if 0 <= local_idx < len(inputs) and 'completion_mask' in outputs:
+                        # Get token length from completion mask
+                        token_length = outputs['completion_mask'][local_idx].sum().item()
+                    # else:
+                        # Fallback to string length if we can't access the completion_mask
+                        # token_length = len(completion)
+                        
+                    incorrect_lengths.append((idx, token_length))
                 
-                # Sort by length (descending)
+                # Sort by length (descending) - replace the longest completion
                 incorrect_lengths.sort(key=lambda x: x[1], reverse=True)
                 
                 # Get the index of the longest incorrect completion
@@ -839,10 +850,114 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 local_idx = longest_idx - self.accelerator.process_index * len(inputs)
                 if 0 <= local_idx < len(inputs):
                     inputs[local_idx]['messages'][-1]['content'] = reference_solution
-    
         # SOLUTION REPLACEMENT LOGIC ENDS HERE
 
-              
+        # SOLUTION TRACKING - CSV GENERATION
+        # Define CSV file path - use output_dir from args
+        csv_file_path = os.path.join(self.args.output_dir, 'solution_stats.csv')
+        stats_headers = ['index', 'question', 'solution', 'answer', 'accuracy', 'token_lengths']
+        
+        # Store solution stats 
+        solution_stats = []
+        
+        # Process each question group 
+        question_groups = {}
+        for i, input_item in enumerate(all_inputs):
+            if 'prompt' not in input_item or len(input_item['prompt']) < 2:
+                continue
+            
+            question = input_item['prompt'][1]['content']
+            if question not in question_groups:
+                question_groups[question] = {
+                    'index': input_item.get('index', i),
+                    'question': question,
+                    'answer': input_item.get('answer', None),
+                    'reference_solution': input_item.get('solution', None),
+                    'completions': [],
+                    'token_lengths': []
+                }
+            
+            # Add completion if it exists
+            if 'messages' in input_item and len(input_item['messages']) > 0:
+                completion = input_item['messages'][-1]['content']
+                question_groups[question]['completions'].append(completion)
+                
+                # Use token length from completion_mask when available
+                local_idx = i - self.accelerator.process_index * len(inputs)
+                if 0 <= local_idx < len(inputs) and 'completion_mask' in outputs:
+                    # Get token length from completion mask
+                    token_length = outputs['completion_mask'][local_idx].sum().item()
+                # else:
+                    # Fallback to string length if we can't access the completion_mask
+                    # token_length = len(completion)
+                    
+                question_groups[question]['token_lengths'].append(token_length)
+        
+        # Now process each question to compute stats
+        for question, data in question_groups.items():
+            index = data['index']
+            answer = data['answer']
+            reference_solution = data['reference_solution']
+            completions = data['completions']
+            token_lengths = data['token_lengths']
+            
+            if not completions:
+                continue
+            
+            # Count correct solutions
+            correct_count = 0
+            correct_completions = []
+            
+            for completion in completions:
+                extracted = extract_boxed_text(completion)
+                if extracted is not None and extracted == answer:
+                    correct_count += 1
+                    correct_completions.append(completion)
+            
+            # Calculate accuracy
+            total_count = len(completions)
+            accuracy = f"{correct_count}/{total_count}"
+            
+            # Choose the shortest correct solution or reference
+            if correct_completions:
+                # Get tokens for each correct completion
+                correct_with_length = [(comp, len(comp.split())) for comp in correct_completions]
+                # Sort by length (shortest first)
+                correct_with_length.sort(key=lambda x: x[1])
+                best_solution = correct_with_length[0][0]
+            else:
+                best_solution = reference_solution
+            
+            # Add to stats
+            solution_stats.append({
+                'index': index,
+                'question': question,
+                'solution': best_solution,
+                'answer': answer,
+                'accuracy': accuracy,
+                'token_lengths': token_lengths,
+            })
+        
+        # Only main process writes to CSV
+        if self.accelerator.is_main_process:
+            # Create output directory if it doesn't exist
+            os.makedirs(os.path.dirname(csv_file_path), exist_ok=True)
+            
+            # Check if file exists to determine mode and whether to write header
+            file_exists = os.path.isfile(csv_file_path)
+            
+            # Open in append mode if file exists, otherwise write mode
+            with open(csv_file_path, 'a' if file_exists else 'w', newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=stats_headers)
+                # Write header only if creating a new file
+                if not file_exists:
+                    writer.writeheader()
+                for row in solution_stats:
+                    writer.writerow(row)
+                    
+        # END OF SOLUTION TRACKING
+
+
         from copy import copy
         template = copy(self.template)
         with self._template_context(template):
@@ -853,7 +968,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         labels = outputs.pop('labels')
         logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
         outputs['logits_to_keep'] = logits_to_keep
-        outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
+        # outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
 
         with torch.no_grad():
             if self.old_policy:
