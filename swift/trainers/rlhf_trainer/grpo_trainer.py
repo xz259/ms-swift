@@ -874,7 +874,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     'answer': input_item.get('answer', None),
                     'reference_solution': input_item.get('solution', None),
                     'completions': [],
-                    'token_lengths': []
+                    'token_lengths': "",
                 }
             
             # Add completion if it exists
@@ -935,7 +935,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 'solution': best_solution,
                 'answer': answer,
                 'accuracy': accuracy,
-                'token_lengths': token_lengths,
+                'token_lengths': ', '.join(map(str, token_lengths)),
             })
         
         # Only main process writes to CSV
