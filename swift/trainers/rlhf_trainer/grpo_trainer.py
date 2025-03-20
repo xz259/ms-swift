@@ -747,12 +747,12 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             InferRequest.remove_response(messages)
             messages.append({'role': 'assistant', 'content': output.choices[0].message.content})
 
-        # Compute token lengths first
+        # START OF SOLUTION REPLACEMENT AND TRACKING LOGIC
+        # Compute completion mask for token length calculation
         outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
-              
-        # SOLUTION REPLACEMENT LOGIC STARTS HERE
+
         def extract_boxed_text(text):
-            pattern = r'\\boxed{(.*?)}'
+            pattern = r'oxed{(.*?)}'
             matches = re.findall(pattern, text)
             if not matches:
                 return None
@@ -766,176 +766,118 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     except Exception:
                         pass           
             return None
-    
+        
         # First gather all inputs across processes
         all_inputs = gather_object(inputs)
         
-        # Organize completions by question
-        completions_by_question = []
-        input_indices_by_question = []
+        # Define data structure to store all question information
+        question_data = {}
         
-        # Group input indices by question
-        current_indices = []
-        current_question = None
-        
-        for i, input_item in enumerate(all_inputs):
-            question = input_item['prompt'][1]['content'] if len(input_item['prompt']) > 1 else None
-            
-            if current_question is None:
-                current_question = question
-                current_indices = [i]
-            elif question == current_question:
-                current_indices.append(i)
-            else:
-                input_indices_by_question.append(current_indices)
-                current_indices = [i]
-                current_question = question
-        
-        # Add the last group
-        if current_indices:
-            input_indices_by_question.append(current_indices)
-        
-        # Now replace longest incorrect solution for each question group
-        for group_indices in input_indices_by_question:
-            if not group_indices:
-                continue
-                
-            # Get answer and solution for this question
-            answer = all_inputs[group_indices[0]].get('answer', None)
-            reference_solution = all_inputs[group_indices[0]].get('solution', None)
-            
-            if answer is None or reference_solution is None:
-                continue
-            
-            # Check correctness of each completion in this group
-            has_correct_solution = False
-            incorrect_indices = []
-            
-            for idx in group_indices:
-                if idx < len(all_inputs) and 'messages' in all_inputs[idx] and len(all_inputs[idx]['messages']) > 0:
-                    completion = all_inputs[idx]['messages'][-1]['content']
-                    extracted = extract_boxed_text(completion)
-                    
-                    if extracted is not None and extracted == answer:
-                        has_correct_solution = True
-                    else:
-                        incorrect_indices.append(idx)
-            
-            # If no correct solutions, replace the longest incorrect one
-            if not has_correct_solution and incorrect_indices and reference_solution != "":
-                # Get lengths of each incorrect completion
-                incorrect_lengths = []
-                
-                for idx in incorrect_indices:
-                    completion = all_inputs[idx]['messages'][-1]['content']
-                    
-                    # Use token length from completion_mask when available
-                    local_idx = idx - self.accelerator.process_index * len(inputs)
-                    if 0 <= local_idx < len(inputs) and 'completion_mask' in outputs:
-                        # Get token length from completion mask
-                        token_length = outputs['completion_mask'][local_idx].sum().item()
-                    # else:
-                        # Fallback to string length if we can't access the completion_mask
-                        # token_length = len(completion)
-                        
-                    incorrect_lengths.append((idx, token_length))
-                
-                # Sort by length (descending) - replace the longest completion
-                incorrect_lengths.sort(key=lambda x: x[1], reverse=True)
-                
-                # Get the index of the longest incorrect completion
-                longest_idx = incorrect_lengths[0][0]
-                
-                # Only modify if this completion is in the current process's slice
-                local_idx = longest_idx - self.accelerator.process_index * len(inputs)
-                if 0 <= local_idx < len(inputs):
-                    inputs[local_idx]['messages'][-1]['content'] = reference_solution
-        # SOLUTION REPLACEMENT LOGIC ENDS HERE
-
-        # SOLUTION TRACKING - CSV GENERATION
-        # Define CSV file path - use output_dir from args
-        csv_file_path = os.path.join(self.args.output_dir, 'solution_stats.csv')
-        stats_headers = ['index', 'question', 'solution', 'answer', 'accuracy', 'token_lengths']
-        
-        # Store solution stats 
-        solution_stats = []
-        
-        # Process each question group 
-        question_groups = {}
+        # Group inputs by question and precompute all necessary data
         for i, input_item in enumerate(all_inputs):
             if 'prompt' not in input_item or len(input_item['prompt']) < 2:
                 continue
             
             question = input_item['prompt'][1]['content']
-            if question not in question_groups:
-                question_groups[question] = {
+            
+            # Initialize question entry if first time seeing this question
+            if question not in question_data:
+                question_data[question] = {
                     'index': input_item.get('index', i),
-                    'question': question,
                     'answer': input_item.get('answer', None),
                     'reference_solution': input_item.get('solution', None),
                     'completions': [],
-                    'token_lengths': "",
+                    'completion_indices': [],
+                    'token_lengths': [],
+                    'correct_indices': [],
+                    'incorrect_indices': []
                 }
             
-            # Add completion if it exists
+            # Process completion if it exists
             if 'messages' in input_item and len(input_item['messages']) > 0:
                 completion = input_item['messages'][-1]['content']
-                question_groups[question]['completions'].append(completion)
                 
-                # Use token length from completion_mask when available
+                # Calculate token length
                 local_idx = i - self.accelerator.process_index * len(inputs)
+                token_length = 0
                 if 0 <= local_idx < len(inputs) and 'completion_mask' in outputs:
-                    # Get token length from completion mask
                     token_length = outputs['completion_mask'][local_idx].sum().item()
-                # else:
-                    # Fallback to string length if we can't access the completion_mask
-                    # token_length = len(completion)
-                    
-                question_groups[question]['token_lengths'].append(token_length)
+                
+                # Check correctness
+                extracted = extract_boxed_text(completion)
+                is_correct = (extracted is not None and 
+                             extracted == question_data[question]['answer'])
+                
+                # Store all information
+                question_data[question]['completions'].append(completion)
+                question_data[question]['completion_indices'].append(i)
+                question_data[question]['token_lengths'].append(token_length)
+                
+                if is_correct:
+                    question_data[question]['correct_indices'].append(i)
+                else:
+                    question_data[question]['incorrect_indices'].append((i, token_length))
         
-        # Now process each question to compute stats
-        for question, data in question_groups.items():
-            index = data['index']
+        # CSV file setup
+        csv_file_path = os.path.join(self.args.output_dir, 'solution_stats.csv')
+        stats_headers = ['index', 'question', 'solution', 'answer', 'accuracy', 'token_lengths']
+        solution_stats = []
+        
+        # Now process each question for both replacement and tracking
+        for question, data in question_data.items():
             answer = data['answer']
             reference_solution = data['reference_solution']
-            completions = data['completions']
-            token_lengths = data['token_lengths']
             
-            if not completions:
+            if answer is None or reference_solution is None:
                 continue
             
+            # Check if there are any correct solutions
+            has_correct_solution = len(data['correct_indices']) > 0
+            
+            # SOLUTION REPLACEMENT LOGIC
+            if not has_correct_solution and data['incorrect_indices'] and reference_solution != "":
+                # Sort incorrect solutions by token length (descending)
+                sorted_incorrect = sorted(data['incorrect_indices'], 
+                                          key=lambda x: x[1], reverse=True)
+                
+                # Get the index of the longest incorrect completion
+                longest_idx = sorted_incorrect[0][0]
+                
+                # Only modify if this completion is in the current process's slice
+                local_idx = longest_idx - self.accelerator.process_index * len(inputs)
+                if 0 <= local_idx < len(inputs):
+                    inputs[local_idx]['messages'][-1]['content'] = reference_solution
+            
+            # SOLUTION TRACKING LOGIC
             # Count correct solutions
-            correct_count = 0
-            correct_completions = []
-            
-            for completion in completions:
-                extracted = extract_boxed_text(completion)
-                if extracted is not None and extracted == answer:
-                    correct_count += 1
-                    correct_completions.append(completion)
-            
-            # Calculate accuracy
-            total_count = len(completions)
+            correct_count = len(data['correct_indices'])
+            total_count = len(data['completions'])
             accuracy = f"{correct_count}/{total_count}"
             
             # Choose the shortest correct solution or reference
-            if correct_completions:
-                # Get tokens for each correct completion
-                correct_with_length = [(comp, len(comp.split())) for comp in correct_completions]
-                # Sort by length (shortest first)
-                correct_with_length.sort(key=lambda x: x[1])
-                best_solution = correct_with_length[0][0]
+            if has_correct_solution:
+                # Get indices of correct completions along with their token lengths
+                correct_with_lengths = []
+                for idx in data['correct_indices']:
+                    pos = data['completion_indices'].index(idx)
+                    completion = data['completions'][pos]
+                    token_length = data['token_lengths'][pos]
+                    correct_with_lengths.append((completion, token_length))
+                
+                # Sort by token length (shortest first)
+                correct_with_lengths.sort(key=lambda x: x[1])
+                best_solution = correct_with_lengths[0][0]
             else:
                 best_solution = reference_solution
             
             # Add to stats
             solution_stats.append({
-                'index': index,
+                'index': data['index'],
                 'question': question,
                 'solution': best_solution,
                 'answer': answer,
                 'accuracy': accuracy,
-                'token_lengths': ', '.join(map(str, token_lengths)),
+                'token_lengths': ', '.join(map(str, data['token_lengths'])),
             })
         
         # Only main process writes to CSV
@@ -954,8 +896,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     writer.writeheader()
                 for row in solution_stats:
                     writer.writerow(row)
-                    
-        # END OF SOLUTION TRACKING
+                            
+        # END OF SOLUTION REPLACEMENT AND TRACKING LOGIC
 
 
         from copy import copy
