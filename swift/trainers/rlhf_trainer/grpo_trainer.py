@@ -747,7 +747,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             InferRequest.remove_response(messages)
             messages.append({'role': 'assistant', 'content': output.choices[0].message.content})
 
-        # START OF SOLUTION REPLACEMENT AND TRACKING LOGIC
+        # START OF SOLUTION REPLACEMENT AND TRACKING
         # Compute completion mask for token length calculation
         outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
 
@@ -897,8 +897,28 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 for row in solution_stats:
                     writer.writerow(row)
                             
-        # END OF SOLUTION REPLACEMENT AND TRACKING LOGIC
+        # END OF SOLUTION REPLACEMENT AND TRACKING
 
+        # Calculate batch accuracy for wandb reporting
+        total_correct = 0
+        total_examples = 0
+        for question, data in question_data.items():
+            total_correct += len(data['correct_indices'])
+            total_examples += len(data['completions'])
+        
+        # Calculate batch accuracy
+        batch_accuracy = total_correct / total_examples if total_examples > 0 else 0.0
+        
+        # Add to metrics dictionary that gets reported to wandb
+        mode = 'eval' if self.control.should_evaluate else 'train'
+        self._metrics[mode]['accuracy'].append(batch_accuracy)
+        
+        # Continue with the rest of the method
+        from copy import copy
+        template = copy(self.template)
+        with self._template_context(template):
+            batched_inputs = [template.encode(infer_request) for infer_request in inputs]
+            outputs = to_device(template.data_collator(batched_inputs), self.model.device)
 
         from copy import copy
         template = copy(self.template)
