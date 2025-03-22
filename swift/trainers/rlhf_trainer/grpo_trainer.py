@@ -882,18 +882,33 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         
         # Only main process writes to CSV
         if self.accelerator.is_main_process:
+            # Get current step number
+            current_step = self.state.global_step if hasattr(self.state, 'global_step') else 0
+            
+            # Create a file every 235 steps
+            file_group = current_step // 235
+            csv_file_path = os.path.join(
+                self.args.output_dir, 
+                f'solution_stats_group{file_group}_step{current_step}.csv'
+            )
+            
+            # Also save to a latest file
+            latest_csv_path = os.path.join(self.args.output_dir, 'solution_stats_latest.csv')
+            
             # Create output directory if it doesn't exist
             os.makedirs(os.path.dirname(csv_file_path), exist_ok=True)
             
-            # Check if file exists to determine mode and whether to write header
-            file_exists = os.path.isfile(csv_file_path)
-            
-            # Open in append mode if file exists, otherwise write mode
-            with open(csv_file_path, 'a' if file_exists else 'w', newline='') as csvfile:
+            # Save to the group-specific file (always create new)
+            with open(csv_file_path, 'w', newline='') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=stats_headers)
-                # Write header only if creating a new file
-                if not file_exists:
-                    writer.writeheader()
+                writer.writeheader()
+                for row in solution_stats:
+                    writer.writerow(row)
+            
+            # Also save to the latest file (always overwrite)
+            with open(latest_csv_path, 'w', newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=stats_headers)
+                writer.writeheader()
                 for row in solution_stats:
                     writer.writerow(row)
                             
