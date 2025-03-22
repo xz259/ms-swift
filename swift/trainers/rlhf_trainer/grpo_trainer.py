@@ -953,16 +953,42 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         rewards_per_func = gather(rewards_per_func)
         # Apply weights to each reward function's output and sum
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).sum(dim=1)
+        
+        # Reshape rewards to group by prompt
+        grouped_rewards = rewards.view(-1, self.num_generations)  # Shape: [num_prompts, num_generations]
+        num_prompts = grouped_rewards.shape[0]
+        advantages = torch.zeros_like(rewards)  # Shape: [total_batch_size]
+        
+        # For each prompt
+        for prompt_idx in range(num_prompts):
+            # Get the rewards for this prompt's completions
+            prompt_rewards = grouped_rewards[prompt_idx]  # Shape: [num_generations]
+            
+            # For each completion
+            for completion_idx in range(self.num_generations):
+                # Create mask to select all rewards except the current one
+                mask = torch.ones(self.num_generations, dtype=torch.bool, device=device)
+                mask[completion_idx] = False
+                
+                # Calculate mean of other rewards (more efficient than concatenation)
+                mean_others = prompt_rewards[mask].mean()
+                
+                # Calculate advantage as current reward minus mean of others
+                flat_idx = prompt_idx * self.num_generations + completion_idx
+                advantages[flat_idx] = prompt_rewards[completion_idx] - mean_others
+        
+        # Apply process_slice to select only the local part
+        advantages = advantages[process_slice]
 
         # Compute grouped-wise rewards
-        mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
-        std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
+        # mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
+        # std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
 
         # Normalize the rewards to compute the advantages
-        mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
-        advantages = advantages[process_slice]
+        # mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+        # std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+        # advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+        # advantages = advantages[process_slice]
 
         # Log the metrics
         mode = 'eval' if self.control.should_evaluate else 'train'
