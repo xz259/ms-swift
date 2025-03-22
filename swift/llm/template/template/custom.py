@@ -16,6 +16,7 @@ class MathTemplateMeta(TemplateMeta):
     suffix: Prompt = field(default_factory=lambda: [''])
     response_prefix: str = '<think>\n'
     default_system: str = 'Please think step by step to solve this problem. Take your final answer modulo 1000 and return it within \\boxed{}.'
+    auto_add_bos: bool = True
 
 # Register the template with a unique name
 register_template(MathTemplateMeta('math_template'))
