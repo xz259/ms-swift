@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from swift.llm.template.template_meta import TemplateMeta
-from swift.llm.template.register import register_template
+from swift.llm.template.register import register_template, get_template
 from swift.llm.template.utils import Prompt
 
 @dataclass
@@ -24,8 +24,7 @@ register_template(MathTemplateMeta('math_template'))
 
 def get_math_template(processor, **kwargs):
     """Helper function to get the math template."""
-    from swift.llm.template import Template
-    return Template.get_template(
+    return get_template(
         template_type="math_template",
         processor=processor,
         **kwargs
