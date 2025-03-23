@@ -784,7 +784,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             if question not in question_data:
                 question_data[question] = {
                     'index': input_item.get('index', i),
-                    'answer': input_item.get('answer', None),
+                    'answer': float(input_item.get('answer', -1)),
                     'reference_solution': input_item.get('solution', None),
                     'completions': [],
                     'completion_indices': [],
@@ -872,10 +872,10 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             
             # Add to stats
             solution_stats.append({
-                'index': data['index'],
+                'index': str(data['index']),  # Ensure string conversion
                 'question': question,
                 'solution': best_solution,
-                'answer': answer,
+                'answer': str(answer),  # Ensure string conversion
                 'accuracy': accuracy,
                 'token_lengths': ', '.join(map(str, data['token_lengths'])),
             })
