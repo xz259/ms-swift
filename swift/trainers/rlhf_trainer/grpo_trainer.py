@@ -942,12 +942,6 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             batched_inputs = [template.encode(infer_request) for infer_request in inputs]
             outputs = to_device(template.data_collator(batched_inputs), self.model.device)
 
-        from copy import copy
-        template = copy(self.template)
-        with self._template_context(template):
-            batched_inputs = [template.encode(infer_request) for infer_request in inputs]
-            outputs = to_device(template.data_collator(batched_inputs), self.model.device)
-
         # we only need to compute the logits for the completion tokens
         labels = outputs.pop('labels')
         logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
