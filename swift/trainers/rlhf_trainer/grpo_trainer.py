@@ -110,6 +110,13 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         self.offload_modules = {}
         self.offload_states = {}
         _, _, _, local_world_size = get_dist_setting()
+
+        # Reference model
+        self.beta = args.beta
+        if self.beta == 0.0:
+            # If beta is 0.0, explicitly set ref_model to None
+            ref_model = None
+          
         if self.args.tensor_parallel_size > 1:
             assert (get_device_count() == local_world_size == self.args.num_infer_workers
                     and local_world_size > 1), ('tensor_parallel_size>1 only supports num_infer_workers==your '
