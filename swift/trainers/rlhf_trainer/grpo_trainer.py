@@ -842,7 +842,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             has_correct_solution = len(data['correct_indices']) > 0
             
             # SOLUTION REPLACEMENT LOGIC
-            if not has_correct_solution and data['incorrect_indices'] and reference_solution != "":
+            if not has_correct_solution and data['incorrect_indices'] and reference_solution != "nan":
                 # Sort incorrect solutions by token length (descending)
                 sorted_incorrect = sorted(data['incorrect_indices'], 
                                           key=lambda x: x[1], reverse=True)
