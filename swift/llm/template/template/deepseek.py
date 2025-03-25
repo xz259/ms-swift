@@ -19,12 +19,15 @@ from ..utils import Prompt, findall
 @dataclass
 class DeepseekR1DistillTemplateMeta(TemplateMeta):
     """Custom template for DeepSeek R1 Distill model."""
-    prefix: Prompt = field(default_factory=lambda: [['bos_token_id']])
-    prompt: Prompt = field(default_factory=lambda: ['User: {{QUERY}}\n\nAssistant:'])
-    chat_sep: Optional[Prompt] = field(default_factory=lambda: [['eos_token_id']])
-    suffix: Prompt = field(default_factory=lambda: [['eos_token_id']])
-    system_prefix: Optional[Prompt] = field(default_factory=lambda: [['bos_token_id'], '{{SYSTEM}}\n\n'])
+    prefix: Prompt = field(default_factory=lambda: ['{{SYSTEM}}'])  # System directly in prefix
+    prompt: Prompt = field(default_factory=lambda: ['<｜User｜>{{QUERY}}<｜Assistant｜>'])
+    chat_sep: Optional[Prompt] = field(default_factory=list)  # No separator between messages
+    suffix: Prompt = field(default_factory=lambda: ['<｜end▁of▁sentence｜>'])  # Only at the end
+    system_prefix: Optional[Prompt] = None  # No separate system prefix needed
     response_prefix: str = '<think>\n'  # prefill <think> token
+    default_system: str = 'Please think step by step to solve this problem. Take your final answer modulo 1000 and return it within \\boxed{}.'
+    auto_add_bos: bool = True
+    
     
 # Register the template with a unique name
 register_template(DeepseekR1DistillTemplateMeta('deepseek_r1_distill'))
