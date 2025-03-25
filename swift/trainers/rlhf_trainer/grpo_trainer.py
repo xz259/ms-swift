@@ -1078,7 +1078,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         advantages = inputs['advantages']
         
         # Define minimum advantage threshold
-        advantage_threshold = 0.15
+        advantage_threshold = 0.1
         
         # Reshape advantages to group by prompt
         batch_size = advantages.shape[0]
