@@ -146,7 +146,7 @@ def prepare_generation_config(model_generation_config: Optional[GenerationConfig
     # not use: 'n', 'best_of', 'frequency_penalty', 'presence_penalty'
     for key in ['length_penalty']:
         kwargs[key] = getattr(request_config, key)
-    for key in ['temperature', 'top_k', 'top_p', 'repetition_penalty', 'num_beams']:
+    for key in ['temperature', 'top_k', 'min_p', 'top_p', 'repetition_penalty', 'num_beams']:
         new_value = getattr(request_config, key)
         if new_value is None:
             kwargs[key] = getattr(model_generation_config, key)
