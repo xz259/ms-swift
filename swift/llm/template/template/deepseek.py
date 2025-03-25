@@ -17,6 +17,19 @@ from ..utils import Prompt, findall
 
 
 @dataclass
+class DeepseekR1DistillTemplateMeta(TemplateMeta):
+    """Custom template for DeepSeek R1 Distill model."""
+    prefix: Prompt = field(default_factory=lambda: [['bos_token_id']])
+    prompt: Prompt = field(default_factory=lambda: ['User: {{QUERY}}\n\nAssistant:'])
+    chat_sep: Optional[Prompt] = field(default_factory=lambda: [['eos_token_id']])
+    suffix: Prompt = field(default_factory=lambda: [['eos_token_id']])
+    system_prefix: Optional[Prompt] = field(default_factory=lambda: [['bos_token_id'], '{{SYSTEM}}\n\n'])
+    response_prefix: str = '<think>\n'  # prefill <think> token
+    
+# Register the template with a unique name
+register_template(DeepseekR1DistillTemplateMeta('deepseek_r1_distill'))
+
+@dataclass
 class DeepseekTemplateMeta(TemplateMeta):
     prefix: Prompt = field(default_factory=lambda: [['bos_token_id']])
     prompt: Prompt = field(default_factory=lambda: ['User: {{QUERY}}\n\nAssistant:'])
