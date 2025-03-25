@@ -274,7 +274,7 @@ register_model(
                 Model('deepseek-ai/DeepSeek-R1-Distill-Llama-70B', 'deepseek-ai/DeepSeek-R1-Distill-Llama-70B'),
             ]),
         ],
-        TemplateType.deepseek_r1_distill,
+        TemplateType.deepseek_r1,
         get_model_tokenizer_with_flash_attn,
         architectures=['Qwen2ForCausalLM', 'LlamaForCausalLM'],
         model_arch=ModelArch.llama,
