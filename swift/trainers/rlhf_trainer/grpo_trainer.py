@@ -1073,38 +1073,91 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if return_outputs:
             raise ValueError('The GRPOTrainer does not support returning outputs')
+            
+        # Get advantages
+        advantages = inputs['advantages']
+        
+        # Define minimum advantage threshold
+        advantage_threshold = 0.15
+        
+        # Reshape advantages to group by prompt
+        batch_size = advantages.shape[0]
+        num_prompts = batch_size // self.num_generations
+        advantages_grouped = advantages.view(num_prompts, self.num_generations)
+        
+        # Check if max absolute advantage for each prompt exceeds threshold
+        max_abs_advantages = torch.max(torch.abs(advantages_grouped), dim=1)[0]
+        valid_prompts = max_abs_advantages >= advantage_threshold
+        
+        # Count valid prompts for rescaling
+        num_valid_prompts = torch.sum(valid_prompts).item()
+        total_prompts = valid_prompts.shape[0]
+        
+        # If no prompts have sufficient advantage, return zero loss
+        if num_valid_prompts == 0:
+            return torch.tensor(0.0, device=advantages.device)
+        
+        # Create mask for valid examples (expand from prompts to all completions)
+        valid_examples = torch.repeat_interleave(valid_prompts, self.num_generations)
+        
+        # Apply mask to advantages
+        masked_advantages = advantages * valid_examples
+        
         # Compute the per-token log probabilities for the model
         completion_mask = inputs['completion_mask']
+        
+        # Apply mask to completion_mask
+        filtered_completion_mask = completion_mask * valid_examples.unsqueeze(1)
+        
+        # Continue with normal loss computation using the filtered data
         per_token_logps = self._get_per_token_logps(model, inputs)
-
+        
         # Compute the KL divergence between the model and the reference model
         if self.beta != 0.0:
             ref_per_token_logps = inputs['ref_per_token_logps']
             per_token_kl = (
                 torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1)
-
-        advantages = inputs['advantages']
+        
         old_per_token_logps = inputs['old_per_token_logps'] if self.old_policy else per_token_logps.detach()
         coef_1 = torch.exp(per_token_logps - old_per_token_logps)
         coef_2 = torch.clamp(coef_1, 1 - self.epsilon, 1 + self.epsilon)
-        per_token_loss1 = coef_1 * advantages.unsqueeze(1)
-        per_token_loss2 = coef_2 * advantages.unsqueeze(1)
+        per_token_loss1 = coef_1 * masked_advantages.unsqueeze(1)  # Use masked advantages
+        per_token_loss2 = coef_2 * masked_advantages.unsqueeze(1)  # Use masked advantages
         per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+        
         if self.beta != 0.0:
             per_token_loss = per_token_loss + self.beta * per_token_kl
-
-        loss = (per_token_loss * completion_mask).sum() / completion_mask.sum()
-
+        
+        # Calculate the loss using only valid examples
+        if filtered_completion_mask.sum() > 0:
+            # Compute loss with filtered mask
+            loss = (per_token_loss * filtered_completion_mask).sum() / filtered_completion_mask.sum()
+            
+            # Rescale the loss to maintain consistent gradient magnitude
+            loss = loss * (total_prompts / num_valid_prompts)
+        else:
+            loss = torch.tensor(0.0, device=advantages.device)
+        
         # Log the metrics
         mode = 'eval' if self.control.should_evaluate else 'train'
-
+        
         if self.beta != 0.0:
-            mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
-            self._metrics[mode]['kl'].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
-
-        is_clipped = (per_token_loss1 < per_token_loss2).float()
-        clip_ratio = (is_clipped * completion_mask).sum() / completion_mask.sum()
-        self._metrics[mode]['clip_ratio'].append(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
+            if filtered_completion_mask.sum() > 0:
+                mean_kl = ((per_token_kl * filtered_completion_mask).sum(dim=1) / 
+                           filtered_completion_mask.sum(dim=1)).mean()
+                self._metrics[mode]['kl'].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
+        
+        if filtered_completion_mask.sum() > 0:
+            is_clipped = (per_token_loss1 < per_token_loss2).float()
+            clip_ratio = (is_clipped * filtered_completion_mask).sum() / filtered_completion_mask.sum()
+            self._metrics[mode]['clip_ratio'].append(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
+        
+        # Log filtering statistics
+        filtered_ratio = (total_prompts - num_valid_prompts) / total_prompts
+        if mode not in self._metrics or 'filtered_ratio' not in self._metrics[mode]:
+            self._metrics[mode]['filtered_ratio'] = []
+        self._metrics[mode]['filtered_ratio'].append(filtered_ratio)
+        
         return loss
 
     # Get the per-token log probabilities for the completions for the model and the reference model
