@@ -115,13 +115,41 @@ def register_model(model_meta: ModelMeta, *, exist_ok: bool = False) -> None:
         the same architectures, template, get_function, etc.
     """
     model_type = model_meta.model_type
+    
+    # Debug logging - print when a model is being registered
+    print(f"Attempting to register model type: '{model_type}'")
+    
+    # Additional info on duplicate registration
+    if model_type in MODEL_MAPPING:
+        # Get call stack information
+        import traceback
+        stack = traceback.extract_stack()
+        calling_file = stack[-2].filename  # The file that called register_model
+        calling_line = stack[-2].lineno    # The line number in that file
+        
+        print(f"WARNING: Model '{model_type}' is already registered!")
+        print(f"Current registration attempt from: {calling_file}:{calling_line}")
+        
+        # If you want to see the call stack
+        print("Call stack:")
+        for frame in stack[:-1]:  # Skip the current frame
+            print(f"  File: {frame.filename}, Line: {frame.lineno}")
+    
     if not exist_ok and model_type in MODEL_MAPPING:
         raise ValueError(f'The `{model_type}` has already been registered in the MODEL_MAPPING.')
+    
     from .constant import MLLMModelType, RMModelType
     if model_type in MLLMModelType.__dict__:
         model_meta.is_multimodal = True
     if model_type in RMModelType.__dict__:
         model_meta.is_reward = True
+    
+    # Log successful registration
+    if model_type not in MODEL_MAPPING:
+        print(f"Successfully registered new model type: '{model_type}'")
+    else:
+        print(f"Replaced existing registration for model type: '{model_type}'")
+    
     MODEL_MAPPING[model_type] = model_meta
 
 
