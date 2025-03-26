@@ -419,34 +419,31 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
     @property
     def infer_rank(self):
         rank, local_rank, world_size, local_world_size = get_dist_setting()
-        # Modified: Use the LAST processes for inference instead of the first ones
-        last_process_ranks = list(range(world_size - self.args.num_infer_workers, world_size))
-        if local_rank in last_process_ranks:
-            infer_idx = last_process_ranks.index(local_rank)
-            return get_node_setting()[0] * self.args.num_infer_workers + infer_idx
+        for _vllm_rank in range(self.args.num_infer_workers):
+            if local_rank == _vllm_rank:
+                return get_node_setting()[0] * self.args.num_infer_workers + _vllm_rank
+
         return -1
-    
+
     @property
     def infer_rank_tp_0(self):
         # whether is tp rank0, get data from this rank
         # vllm needs all tp ranks inputs and sampling params are the same
         rank, local_rank, world_size, local_world_size = get_dist_setting()
-        # Modified: Use the LAST processes for inference
-        last_process_ranks = list(range(world_size - self.args.num_infer_workers, world_size))
-        if local_rank in last_process_ranks:
-            infer_idx = last_process_ranks.index(local_rank)
-            if infer_idx % self.args.tensor_parallel_size == 0:
-                return (get_node_setting()[0] * self.args.num_infer_workers 
-                        + infer_idx // self.args.tensor_parallel_size)
+        for _vllm_rank in range(self.args.num_infer_workers):
+            if local_rank == _vllm_rank and _vllm_rank % self.args.tensor_parallel_size == 0:
+                return (get_node_setting()[0] * self.args.num_infer_workers
+                        + _vllm_rank // self.args.tensor_parallel_size)
+
         return -1
-    
+
     @property
     def local_infer_rank(self):
         rank, local_rank, world_size, local_world_size = get_dist_setting()
-        # Modified: Use the LAST processes for inference
-        last_process_ranks = list(range(world_size - self.args.num_infer_workers, world_size))
-        if local_rank in last_process_ranks:
-            return last_process_ranks.index(local_rank)
+        for _vllm_rank in range(self.args.num_infer_workers):
+            if local_rank == _vllm_rank:
+                return _vllm_rank
+
         return -1
       
 
