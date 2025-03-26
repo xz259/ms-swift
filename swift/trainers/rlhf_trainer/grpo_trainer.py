@@ -994,6 +994,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         grouped_rewards = rewards.view(-1, self.num_generations)  # Shape: [num_prompts, num_generations]
         num_prompts = grouped_rewards.shape[0]
         advantages = torch.zeros_like(rewards)  # Shape: [total_batch_size]
+      
+        max_advantages = torch.zeros(num_prompts, device=device)
         
         # For each prompt
         for prompt_idx in range(num_prompts):
@@ -1054,7 +1056,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             self._metrics[mode][f'rewards/{reward_func_name}'].append(reward_per_func[i].item())
 
         self._metrics[mode]['reward'].append(rewards.mean().item())
-        self._metrics[mode]['reward_std'].append(std_grouped_rewards.mean().item())
+        # self._metrics[mode]['reward_std'].append(std_grouped_rewards.mean().item())
         outputs.update({
             'ref_per_token_logps': ref_per_token_logps,
             'advantages': advantages,
