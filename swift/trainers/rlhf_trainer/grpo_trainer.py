@@ -1011,7 +1011,11 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 
                 # Calculate advantage as current reward minus mean of others
                 flat_idx = prompt_idx * self.num_generations + completion_idx
-                advantages[flat_idx] = prompt_rewards[completion_idx] - mean_others
+                advantage_value = prompt_rewards[completion_idx] - mean_others
+                advantages[flat_idx] = advantage_value
+              
+                # Track max advantage for this prompt
+                max_advantages[prompt_idx] = torch.max(max_advantages[prompt_idx], torch.abs(advantage_value))
         
         # Apply process_slice to select only the local part
         advantages = advantages[process_slice]
@@ -1030,6 +1034,9 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         mode = 'eval' if self.control.should_evaluate else 'train'
         completion_length = self.accelerator.gather_for_metrics(outputs['completion_mask'].sum(1)).float().mean().item()
         self._metrics[mode]['completion_length'].append(completion_length)
+        mean_max_advantage = max_advantages.mean().item()
+        self._metrics[mode]['max_advantage'].append(mean_max_advantage)
+      
         # clip ratio
         response_clip_ratio = torch.gt(
             self.accelerator.gather_for_metrics(outputs['completion_mask'].sum(1)),
