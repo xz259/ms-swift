@@ -207,7 +207,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             if self.infer_rank >= 0:
                 fast_infer_device = self.args.vllm_device or self.args.lmdeploy_device
                 
-                # NEW: Ensure consistent handling of device parameter
+                # NEW: Ensure consistent type handling for device parameter
                 if isinstance(fast_infer_device, str):
                     if fast_infer_device == 'auto':
                         # Keep the existing auto-assignment logic
@@ -220,38 +220,46 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     else:
                         # Single device specified as string
                         fast_infer_device = [fast_infer_device]
-        
+                
+                # Check devices are available and warn about conflicts
                 for _device in fast_infer_device:
                     # Check that the requested device is available
                     if _device.split(':')[0] in {'cuda', 'npu'} and int(_device.split(':')[1]) >= get_device_count():
                         raise ValueError(f'The requested device for vllm ({_device}) is not available. '
-                                         f'You are likely using vLLM '
-                                         'without restricting the number of GPUs for training. '
-                                         'Set the `--num_processes` argument to a '
-                                         'value lower than the number of GPUs available on your machine—typically, '
-                                         'reducing it by one is sufficient. '
-                                         f'In your case: `--num_processes {get_device_count() - 1}`.')
+                                        f'You are likely using vLLM '
+                                        'without restricting the number of GPUs for training. '
+                                        'Set the `--num_processes` argument to a '
+                                        'value lower than the number of GPUs available on your machine—typically, '
+                                        'reducing it by one is sufficient. '
+                                        f'In your case: `--num_processes {get_device_count() - 1}`.')
+                    
                     # Check that the requested device is not also used for training
-                    if _device in {get_device(idx) for idx in range(self.accelerator.num_processes)}:
+                    current_device = get_device()
+                    if _device == current_device:
+                        logger.warning(f'CRITICAL WARNING: Process {self.infer_rank} is trying to use {_device} for both training and inference!')
+                        logger.warning(f'This WILL cause memory conflicts and deadlocks!')
+                        logger.warning(f'Please specify a different device for vLLM/LMDeploy that is not being used for training.')
+                    elif _device in {get_device(idx) for idx in range(self.accelerator.num_processes)}:
                         logger.warning(f'The requested device {_device} is also used for training. '
-                                       f'This may lead to unexpected behavior. '
-                                       f'It is recommended to use a dedicated device for vLLM.')
-        
+                                    f'This may lead to unexpected behavior. '
+                                    f'It is recommended to use a dedicated device for vLLM.')
+                
                 if use_vllm:
                     if not is_vllm_available():
                         raise ImportError('vLLM is not available and `use_vllm` is set to True. '
-                                          'Please install vLLM with `pip install vllm -U` to use it.')
+                                        'Please install vLLM with `pip install vllm -U` to use it.')
                     self.prepare_vllm(model, fast_infer_device)
-                    # MODIFIED: Always use the first device in the list
+                    # NEW: Always use the first device in the list for this process
+                    # This avoids the indexing issues while still using the specified device
                     self.infer_device = fast_infer_device[0]
                 elif use_lmdeploy:
                     if not is_lmdeploy_available():
                         raise ImportError('LMDeploy is not available and `use_lmdeploy` is set to True.'
-                                          'Please install LMDeploy with `pip install lmdeploy -U` to use it.')
+                                        'Please install LMDeploy with `pip install lmdeploy -U` to use it.')
                     from swift.llm import LmdeployEngine
                     from swift.tuners import Swift
                     with Swift.grpo_context(model, self.template.processor):
-                        # MODIFIED: Use first device regardless of infer rank
+                        # NEW: Use the first device in the list
                         device_str = fast_infer_device[0]
                         device_idx = int(device_str.split(':')[1])
                         self.engine = LmdeployEngine(
@@ -264,7 +272,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                             reload_weights=True)
                         self.infer_device = device_idx
                     self.engine.default_template = self.template
-                self._last_loaded_step = 0  # tag to avoid useless loading during grad accumulation
+                self._last_loaded_step = 0
         
                 # When using vLLM, the main process is responsible for loading the model weights. This can cause process
                 # desynchronization and seems to lead to DeepSpeed hanging during initialization. To prevent this, we
