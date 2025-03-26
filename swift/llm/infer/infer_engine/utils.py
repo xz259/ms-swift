@@ -476,7 +476,11 @@ def set_device_context(device: Union[str, int]):
 @contextmanager
 def set_local_rank_context(device: Union[str, int]):
     if isinstance(device, str):
-        device = int(device.split(':')[-1])
+        if device == 'auto':
+            # Auto mode - use the last available GPU 
+            device = get_device_count() - 1
+        else:
+            device = int(device.split(':')[-1])
     origin_local_rank = os.environ.get('LOCAL_RANK', None)
     os.environ['LOCAL_RANK'] = str(device)
     try:
