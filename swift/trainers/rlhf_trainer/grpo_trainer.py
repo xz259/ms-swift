@@ -1152,12 +1152,6 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             clip_ratio = (is_clipped * filtered_completion_mask).sum() / filtered_completion_mask.sum()
             self._metrics[mode]['clip_ratio'].append(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
         
-        # Log filtering statistics
-        filtered_ratio = (total_prompts - num_valid_prompts) / total_prompts
-        if mode not in self._metrics or 'filtered_ratio' not in self._metrics[mode]:
-            self._metrics[mode]['filtered_ratio'] = []
-        self._metrics[mode]['filtered_ratio'].append(filtered_ratio)
-        
         return loss
 
     # Get the per-token log probabilities for the completions for the model and the reference model
