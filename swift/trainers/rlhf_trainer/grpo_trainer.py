@@ -201,17 +201,26 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         self.parameter_groups, self.parameter_groups_no_lora = self.split_batches()
         self.infer_device = None
 
+                   
+        # infer_device
         if use_vllm or use_lmdeploy:
             if self.infer_rank >= 0:
                 fast_infer_device = self.args.vllm_device or self.args.lmdeploy_device
-                if fast_infer_device[0] == 'auto':
-                    if get_device_count() == 1:
-                        fast_infer_device = [get_device()]  # particular case when training with only 1 GPU: share it
+                
+                # NEW: Ensure consistent handling of device parameter
+                if isinstance(fast_infer_device, str):
+                    if fast_infer_device == 'auto':
+                        # Keep the existing auto-assignment logic
+                        if get_device_count() == 1:
+                            fast_infer_device = [get_device()]
+                        else:
+                            fast_infer_device = []
+                            for idx in range(get_device_count() - self.args.num_infer_workers, get_device_count()):
+                                fast_infer_device.append(get_device(idx))
                     else:
-                        fast_infer_device = []
-                        for idx in range(get_device_count() - self.args.num_infer_workers, get_device_count()):
-                            fast_infer_device.append(get_device(idx))
-
+                        # Single device specified as string
+                        fast_infer_device = [fast_infer_device]
+        
                 for _device in fast_infer_device:
                     # Check that the requested device is available
                     if _device.split(':')[0] in {'cuda', 'npu'} and int(_device.split(':')[1]) >= get_device_count():
@@ -227,13 +236,14 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                         logger.warning(f'The requested device {_device} is also used for training. '
                                        f'This may lead to unexpected behavior. '
                                        f'It is recommended to use a dedicated device for vLLM.')
-
+        
                 if use_vllm:
                     if not is_vllm_available():
                         raise ImportError('vLLM is not available and `use_vllm` is set to True. '
                                           'Please install vLLM with `pip install vllm -U` to use it.')
                     self.prepare_vllm(model, fast_infer_device)
-                    self.infer_device = fast_infer_device[self.local_infer_rank]
+                    # MODIFIED: Always use the first device in the list
+                    self.infer_device = fast_infer_device[0]
                 elif use_lmdeploy:
                     if not is_lmdeploy_available():
                         raise ImportError('LMDeploy is not available and `use_lmdeploy` is set to True.'
@@ -241,26 +251,31 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     from swift.llm import LmdeployEngine
                     from swift.tuners import Swift
                     with Swift.grpo_context(model, self.template.processor):
-                        fast_infer_device = int(fast_infer_device[self.local_infer_rank].split(':')[1])
+                        # MODIFIED: Use first device regardless of infer rank
+                        device_str = fast_infer_device[0]
+                        device_idx = int(device_str.split(':')[1])
                         self.engine = LmdeployEngine(
                             model.model_dir,
                             model.model_info.torch_dtype,
                             model_type=model.model_meta.model_type,
-                            devices=[fast_infer_device],
+                            devices=[device_idx],
                             session_len=args.lmdeploy_session_len,
                             cache_max_entry_count=args.lmdeploy_cache_max_entry_count,
                             reload_weights=True)
-                        self.infer_device = fast_infer_device
+                        self.infer_device = device_idx
                     self.engine.default_template = self.template
-            self._last_loaded_step = 0  # tag to avoid useless loading during grad accumulation
+                self._last_loaded_step = 0  # tag to avoid useless loading during grad accumulation
+        
+                # When using vLLM, the main process is responsible for loading the model weights. This can cause process
+                # desynchronization and seems to lead to DeepSpeed hanging during initialization. To prevent this, we
+                # synchronize all processes after vLLM has been fully initialized.
+                self.accelerator.wait_for_everyone()
+            else:
+                from swift.llm import PtEngine
+                self.engine = PtEngine.from_model_template(self.model, self.template, max_batch_size=0)  # 0: no limit
 
-            # When using vLLM, the main process is responsible for loading the model weights. This can cause process
-            # desynchronization and seems to lead to DeepSpeed hanging during initialization. To prevent this, we
-            # synchronize all processes after vLLM has been fully initialized.
-            self.accelerator.wait_for_everyone()
-        else:
-            from swift.llm import PtEngine
-            self.engine = PtEngine.from_model_template(self.model, self.template, max_batch_size=0)  # 0: no limit
+
+                   
         self.request_config = RequestConfig(
             max_tokens=args.max_completion_length,
             temperature=args.temperature,
@@ -385,7 +400,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 model.model_dir,
                 model.model_info.torch_dtype,
                 model_type=model.model_meta.model_type,
-                device=fast_infer_device[self.local_infer_rank],
+                # MODIFIED: Always use the first device
+                device=fast_infer_device[0],
                 tensor_parallel_size=self.args.tensor_parallel_size,
                 gpu_memory_utilization=self.args.vllm_gpu_memory_utilization,
                 enable_prefix_caching=self.args.vllm_enable_prefix_caching,
